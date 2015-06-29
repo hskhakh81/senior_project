@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Context antiJARLocking="true" path="/senior_project">
+    
+    <Resource   name="jdbc/csci198"
+                auth="Container"
+                type="javax.sql.DataSource"
+                username="harpreet"
+                password="potato"
+                driverClassName="com.mysql.jdbc.Driver"
+                url="jdbc:mysql://localhost:3306/csci198?useUnicode=true&amp;characterEncoding=utf8"
+                maxActive="8"
+                maxIdle="4" 
+                />
+    
+</Context>

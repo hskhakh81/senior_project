@@ -1,0 +1,16 @@
+#header {
+    text-align: center;
+}
+
+#content {
+    min-height: 300px;
+    margin-left: 10%;
+    margin-right: 20%;
+    border-left: solid 1px blanchedalmond;
+    padding-left: 5%;
+}
+
+
+#footer {
+    font-size: 80%;
+}
