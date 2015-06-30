@@ -10,6 +10,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.sql.Statement;
 import javax.naming.Context;
 import javax.naming.InitialContext;
@@ -52,12 +53,13 @@ public class FileUploadServlet extends HttpServlet {
         long counter = 0;
         long records_inserted = 0;
         String user = "hkhakh";
-        
+        int commit_threshold = 1000;
+        ResultSet rs;
+
         //get File Part
         Part file = request.getPart("filename");
         String file_name = getFileNameFromPart(file);
-        
-        
+
         if (file != null) {
             try {
                 // Get a handle to the JNDI environment naming context
@@ -66,26 +68,26 @@ public class FileUploadServlet extends HttpServlet {
                 String uploadPath = (String) env.lookup("UploadPath");
 
                 upload_log = "Uploading file ... ";
-                
+
                 //upload file
                 byte[] b = new byte[1024];
                 InputStream inFile = file.getInputStream();
                 FileOutputStream outFile = new FileOutputStream(
-                        new File(uploadPath + File.separator + getFileNameFromPart(file)));
+                        new File(uploadPath + File.separator + file_name));
                 while (inFile.read(b) > 0) {
                     outFile.write(b);
                 }
 
                 upload_log = upload_log.concat("File uploaded, adding contents to database...");
-            
+
                 inFile.close();
                 outFile.close();
-                
+
                 BufferedReader in = new BufferedReader(new FileReader(
-                                new File(uploadPath + File.separator + file_name)));
-                
+                        new File(uploadPath + File.separator + file_name)));
+
                 File dir = new File(uploadPath);
-                for(File f: dir.listFiles()) {
+                for (File f : dir.listFiles()) {
                     System.out.println(f.getName());
                 }
                 //insert file into database
@@ -93,74 +95,108 @@ public class FileUploadServlet extends HttpServlet {
                 ds = (DataSource) env.lookup("jdbc/csci198");
                 //get connection from datasource
                 con = ds.getConnection();
+
                 //create statement
                 st = con.createStatement();
-                
-                ResultSet rs1 = st.getGeneratedKeys();
-                
-                
-                int file_id = st.executeUpdate("insert into Upload_Header (file_name, upload_type) "
-                        + " values ('" + file_name + "','" + upload_type + "')");
-                
-                System.out.println("File_id after insert:" + file_id);
-                
-                pst = con.prepareStatement("insert into upload_detail (file_id, "
-                        + "line_num, line_content, created_by, created_on) "
-                        + "values (?,?,?)");
-                //insert records
-                while((line = in.readLine()) != null) {
-                    //  file_name, line_number, line_contents
-                    System.out.println(line);
-                    pst.setInt(1, file_id);
-                    pst.setLong(2, ++counter);
-                    pst.setString(3, line);
-                    pst.setString(4, user);
-                    pst.setDate(5, new java.sql.Date(System.currentTimeMillis()));
-                    records_inserted += pst.executeUpdate();
-                    
-                }
-                //close file
-                in.close();
-                
-                //close statement and connection
-                //if (!st.isClosed()) st.close();
-                //if (!con.isClosed()) con.close();
-                
-                upload_log = upload_log.concat("File added to database (" + records_inserted + " records inserted)... finishing file processing ...");
 
-                //move file to processed folder
-                //check if processed folder exists in uploadPath folder
-                //request.setAttribute("file_name", uploadPath);
-                
+                //check if file already exists
+                if (st.execute("select count(*) from Upload_Header where file_name='" + file_name + "'")) {
+                    rs = st.getResultSet();
+                    rs.first();
+                    if (rs.getInt(1) > 0) {
+                        request.setAttribute("upload_status", "failed.");
+                        request.setAttribute("error", "File " + file_name + " already exists.");
+                    } else {
+
+                        //set connection preferences
+                        con.setAutoCommit(false);
+                        //Savepoint sav1 = con.setSavepoint();
+
+                        //insert file name in file header, get auto-generated file id
+                        st.executeUpdate("insert into Upload_Header (file_name, upload_type) "
+                                + " values ('" + file_name + "','" + upload_type + "')", 1);
+
+                        ResultSet rs1 = st.getGeneratedKeys();
+                        int file_id = 0;
+                        if (rs1.first()) {
+                            file_id = rs1.getInt(1);
+                        }
+
+                        System.out.println("File_id after insert:" + file_id);
+
+                        pst = con.prepareStatement("insert into upload_detail (file_id, "
+                                + "line_num, line_content, created_by, created_on) "
+                                + "values (?,?,?,?,?)");
+                        //insert records
+                        while ((line = in.readLine()) != null) {
+                            //  file_name, line_number, line_contents
+                            System.out.println(line);
+                            pst.setInt(1, file_id);
+                            pst.setLong(2, ++counter);
+                            pst.setString(3, line);
+                            pst.setString(4, user);
+                            pst.setDate(5, new java.sql.Date(System.currentTimeMillis()));
+                            records_inserted += pst.executeUpdate();
+                            //commit after commit_threshold has reached
+                            if (counter % commit_threshold == 0) {
+                                con.commit();
+                            }
+                        }
+                        con.commit();
+                        //close file
+                        in.close();
+
+                        //close statement and connection
+                        //if (!st.isClosed()) st.close();
+                        //if (!con.isClosed()) con.close();
+                        upload_log = upload_log.concat("File added to database (" + records_inserted + " records inserted)... finishing file processing ...");
+
+                        //move file to processed folder
+                        //check if processed folder exists in uploadPath folder
+                        //request.setAttribute("file_name", uploadPath);
+                    }
+                }
 
             } catch (NamingException ne) {
                 request.setAttribute("upload_status", "failed.");
                 request.setAttribute("error", "Naming Exception: " + ne);
             } catch (SQLException e) {
-                request.setAttribute("upload_status", "failed.");
-                request.setAttribute("error", "SQL Exception: " + e);
+                try{
+                    if (con != null) con.rollback();
+                } catch (SQLException se) {
+                    request.setAttribute("upload_status", "failed.");
+                    request.setAttribute("error", "SQL Exception while rolling back: " + se);
+                }
+                request.setAttribute("error", (request.getAttribute("error")==null?"":request.getAttribute("error")) + 
+                        "SQL Exception: " + e);
             } finally {
                 //close statement and connection
                 try {
-                   if (pst != null && !pst.isClosed()) pst.close();
-                   if (st != null && !st.isClosed()) st.close();
-                   if (con != null && !con.isClosed()) con.close();
+                    if (pst != null && !pst.isClosed()) {
+                        pst.close();
+                    }
+                    if (st != null && !st.isClosed()) {
+                        st.close();
+                    }
+                    if (con != null && !con.isClosed()) {
+                        con.close();
+                    }
                 } catch (SQLException e) {
                     request.setAttribute("upload_status", "failed.");
                     request.setAttribute("error", "SQL Exception: " + e);
                 }
             }
-            
+
             upload_log = upload_log.concat("File uploaded successfully.");
-            
+
         } else {
             //part is null
             //TODO: what to do here?
             upload_log = "Nothing to upload";
         }
-        
+
         request.setAttribute("upload_comments", upload_log);
-        
+
         getServletContext().getRequestDispatcher("/FileUpload.jsp").forward(request, response);
 
         //response.sendRedirect("FileUpload");
